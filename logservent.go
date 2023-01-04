@@ -28,7 +28,7 @@ type LogServerRpc Nothing
 type GrepClientRpc Nothing
 
 type Args struct {
-  TcpAddr  net.Addr
+  TcpAddr  net.TcpAddr
   Query    string
 }
 
@@ -37,7 +37,7 @@ type Args struct {
 // RPC from queried log server to log server
 // Takes output from grep and sends it over a TCP connection to the caller
 func (_ *LogServerRpc) LoggerQuery(args Args, reply *Nothing) error {
-  conn, err := net.Dial("tcp", args.TcpAddr.String())
+  conn, err := net.DialTcp("tcp", nil, &args.TcpAddr)
   defer conn.Close()
   if err != nil {
     return errors.New("Could not call back: " + err.Error())
@@ -75,22 +75,28 @@ func (_ *LogServerRpc) LoggerQuery(args Args, reply *Nothing) error {
   return nil
 }
 
-func serverReader(wg sync.WaitGroup, args Args, addrStr string, listenPort string, ch chan<- string) {
+func serverReader(wg sync.WaitGroup, args Args, addrStr string, listenPort int, ch chan<- string) {
   wg.Add(1)
   defer wg.Done()
-  client, err := rpc.DialHTTP("tcp", addrStr + ":" + rpcPort)
+
+  conn, err := net.Dial("tcp", addrStr + ":" + rpcPort)
+  defer conn.Close()
   if err != nil {
     return
   }
+  client := rpc.NewClient(conn)
 
-  listener, err := net.Listen("tcp", "localhost:" + listenPort)
+  args.TcpAddr = conn.LocalAddr().(*net.TCPAddr)
+  args.TcpAddr.Port = listenPort
+
+  listener, err := net.ListenTCP("tcp", &args.TcpAddr)
   serverConnCh := make(chan net.Conn)
   go func() {
-    conn, err := listener.Accept()
+    serverConn, err := listener.Accept()
     if err != nil {
       close(serverConnCh)
     }
-    serverConnCh <- conn
+    serverConnCh <- serverConn
   }()
 
   doneCh := client.Go("LogServerRpc.LoggerQuery", args, nil, nil)
@@ -108,12 +114,12 @@ func serverReader(wg sync.WaitGroup, args Args, addrStr string, listenPort strin
   <-doneCh.Done
 }
 
-func done(wg sync.WaitGroup, doneCh chan Nothing) {
+func done(wg sync.WaitGroup, doneCh chan<- Nothing, ch chan<- string) {
   wg.Wait()
   doneCh <- Nothing{}
+  close(ch)
 }
 
-// spawn 1 of these to send to the grep client
 func clientWriter(clientConn net.Conn, ch <-chan string, doneCh <-chan Nothing) {
   for {
     select {
@@ -137,7 +143,7 @@ func (_ *GrepClientRpc) GrepQuery(args Args, reply *Nothing) error {
   var wg sync.WaitGroup
 
   for i, addrStr := range machineAddrs {
-    go serverReader(wg, args, addrStr, fmt.Sprintf("%s", kListenPort + i), grepResultsCh)
+    go serverReader(wg, args, addrStr, kListenPort + i, grepResultsCh)
   }
 
   conn, err := net.Dial("tcp", args.TcpAddr.String())
