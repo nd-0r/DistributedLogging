@@ -5,14 +5,12 @@ import (
   "fmt"
   "log"
   "os"
-  "net"
   "net/rpc"
-  "bufio"
+  "github.com/hsfzxjy/go-srpc"
 )
 
 type Args struct {
-  TcpAddr  net.TCPAddr
-  Query    string
+  Query string
 }
 
 const kListenPort = 1233
@@ -21,44 +19,24 @@ const kRpcPort = "1234"
 var address = flag.String("a", "localhost", "The address of the log servent")
 
 func query(q string, addr string) {
-  conn, err := net.Dial("tcp", addr + ":" + kRpcPort)
-  defer conn.Close()
+  c, err := rpc.DialHTTP("tcp", addr + ":" + kRpcPort)
   if err != nil {
     log.Fatal("dialing:", err)
   }
-  client := rpc.NewClient(conn)
+  client := srpc.WrapClient(c)
 
-  locAddr := *conn.LocalAddr().(*net.TCPAddr)
-  locAddr.Port = kListenPort
   args := Args {
-    locAddr,
     q,
   }
 
-  listener, err := net.ListenTCP("tcp", &args.TcpAddr)
-  serverConnCh := make(chan net.Conn)
-  go func() {
-    serverConn, err := listener.Accept()
-    if err != nil {
-      close(serverConnCh)
-    }
-    serverConnCh <- serverConn
-  }()
-
-  doneCh := client.Go("GrepClientRpc.GrepQuery", args, nil, nil)
-
-  serverConn := <-serverConnCh
-  if serverConn == nil {
-    return
-  }
-  defer serverConn.Close()
-  input := bufio.NewScanner(serverConn)
-
-  for input.Scan() {
-    fmt.Println(input.Text())
+  stream, err := client.CallStream("GrepClientRpc.GrepQuery", args)
+  if err != nil {
+    log.Fatal("CallStream: ", err)
   }
 
-  <-doneCh.Done
+  for line := range stream.C() {
+    fmt.Println(line.(string))
+  }
 }
 
 func main() {
