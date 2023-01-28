@@ -1,8 +1,10 @@
 package leveled_logger
 
 import (
+  "runtime"
   "sync"
   "log"
+  "path/filepath"
 )
 
 type LogLevel int
@@ -35,8 +37,16 @@ func (l *LeveledLogger) PrintfNormal(format string, args ...any) {
   l.mutex.Lock()
   defer l.mutex.Unlock()
 
+  pc, filename, line, _ := runtime.Caller(1)
+
   if l.level >= Normal {
-    l.Printf(format, args)
+    l.Printf(
+      "%s[%s:%d] :: " + format,
+      append(
+        []any{runtime.FuncForPC(pc).Name(), filepath.Base(filename), line},
+        args...
+      )...
+    )
   }
 }
 
@@ -44,8 +54,16 @@ func (l *LeveledLogger) PrintfDebug(format string, args ...any) {
   l.mutex.Lock()
   defer l.mutex.Unlock()
 
+  pc, filename, line, _ := runtime.Caller(1)
+
   if l.level >= Debug {
-    l.Printf(format, args)
+    l.Printf(
+      "%s[%s:%d] :: " + format,
+      append(
+        []any{runtime.FuncForPC(pc).Name(), filepath.Base(filename), line},
+        args...
+      )...
+    )
   }
 }
 

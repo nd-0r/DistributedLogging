@@ -59,7 +59,7 @@ func grepLogs(args Args, resultsCh chan<- string, errCh chan<- error) {
 
   for _, dirent := range dirents {
     grepCmd := exec.Command("grep", "-e", args.Query, filepath.Join(*logDir, dirent.Name()))
-    logger.PrintfDebug("grepCmd: \n", grepCmd.String())
+    logger.PrintfDebug("grepCmd: %s\n", grepCmd.String())
     grepOut, err := grepCmd.StdoutPipe()
 
     if err != nil {
@@ -198,7 +198,7 @@ func usage() {
 func main() {
   flag.Parse()
 
-  logger.Logger = log.New(os.Stdout, "", log.LstdFlags | log.Lshortfile)
+  logger.Logger = log.New(os.Stdout, "", log.LstdFlags)
   logger.SetLevel(leveled_logger.LogLevel(*debugLevel))
   defer logger.AutoPrefix("main: ")()
 
