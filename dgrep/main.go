@@ -35,15 +35,23 @@ func query(q string, addr string) {
   }
 
   for line := range stream.C() {
-    fmt.Println(line.(string))
+    // fmt.Print(line.(string))
+    log.Printf("recieve value from remote: %+v\n", line)
   }
+}
+
+func usage() {
+  fmt.Fprintf(os.Stderr,
+              "Usage: %s [-a <log server address>] <query string>\n",
+              os.Args[0])
+  flag.PrintDefaults()
 }
 
 func main() {
   flag.Parse()
 
   if flag.NArg() != 1 {
-    flag.PrintDefaults()
+    usage()
     os.Exit(1)
   }
 

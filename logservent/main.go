@@ -6,13 +6,13 @@ import (
   "log"
   "os"
   "os/exec"
+  "path/filepath"
   "net"
   "net/rpc"
   "net/http"
   "bufio"
   "sync"
   "errors"
-  "io/ioutil"
   "andreworals.com/dlogger/leveled_logger"
   "github.com/hsfzxjy/go-srpc"
 )
@@ -35,38 +35,73 @@ type LogServerRpc string
 type GrepClientRpc string
 
 type Args struct {
-  TcpAddr  net.TCPAddr
   Query    string
 }
 
 //==============================================================//
 
+func grepLogs(args Args, resultsCh chan<- string, errCh chan<- error) {
+  var errOut error = nil
+  defer func() {
+    if errOut != nil && errCh != nil {
+      errCh <- errOut
+    }
+    if errOut != nil {
+      logger.PrintfDebug(errOut.Error())
+    }
+  }()
+
+  dirents, err := os.ReadDir(*logDir)
+  if err != nil {
+    errOut = errors.New("Could not read logs: " + err.Error())
+    return
+  }
+
+  for _, dirent := range dirents {
+    grepCmd := exec.Command("grep", "-e", args.Query, filepath.Join(*logDir, dirent.Name()))
+    logger.PrintfDebug("grepCmd: \n", grepCmd.String())
+    grepOut, err := grepCmd.StdoutPipe()
+
+    if err != nil {
+      errOut = errors.New("Could not open pipe from grep: " + err.Error())
+      return
+    }
+
+    if err := grepCmd.Start(); err != nil {
+      errOut = errors.New("Could not start grep" + err.Error())
+      return
+    }
+
+    grepOutScanner := bufio.NewScanner(grepOut)
+    for grepOutScanner.Scan() {
+      toout := grepOutScanner.Text()
+      resultsCh <- toout
+    }
+
+    if err := grepCmd.Wait(); err != nil {
+      if grepCmd.ProcessState.ExitCode() != 1 {
+        errOut = errors.New("Failed to wait on grep process: " + err.Error())
+        return
+      }
+    }
+  }
+}
+
 // RPC from queried log server to log server
 // Takes output from grep and sends it over a TCP connection to the caller
 func (*LogServerRpc) LoggerQuery(args Args, s *srpc.Session) error {
-  files, err := ioutil.ReadDir(*logDir)
-  if err != nil {
-    return errors.New("Could not read logs: " + err.Error())
-  }
-
   return srpc.S( func() error {
-    for _, file := range files {
-      grepCmd := exec.Command("grep", "-e", args.Query, file.Name())
-      grepOut, err := grepCmd.StdoutPipe()
+    resultsCh := make(chan string)
+    errCh := make(chan error)
 
-      if err != nil {
-        return errors.New("Could not open pipe from grep: " + err.Error())
-      }
-      if err := grepCmd.Start(); err != nil {
-        return errors.New("Could not start grep" + err.Error())
-      }
-      if err != nil {
-        continue
-      }
+    go grepLogs(args, resultsCh, errCh)
 
-      grepOutScanner := bufio.NewScanner(grepOut)
-      for grepOutScanner.Scan() {
-        s.PushValue(grepOutScanner.Text())
+    for {
+      select {
+      case line := <-resultsCh:
+        s.PushValue(line)
+      case err := <-errCh:
+        return err
       }
     }
 
@@ -74,8 +109,7 @@ func (*LogServerRpc) LoggerQuery(args Args, s *srpc.Session) error {
   }, s, nil)
 }
 
-func serverReader(wg sync.WaitGroup, args Args, addrStr string, listenPort int, ch chan<- string) {
-  wg.Add(1)
+func serverReader(wg *sync.WaitGroup, args Args, addrStr string, listenPort int, ch chan<- string) {
   defer wg.Done()
 
   c, err := rpc.DialHTTP("tcp", addrStr + ":" + rpcPort)
@@ -90,8 +124,9 @@ func serverReader(wg sync.WaitGroup, args Args, addrStr string, listenPort int, 
   }
 }
 
-func done(wg sync.WaitGroup, doneCh chan<- Nothing, ch chan<- string) {
+func done(wg *sync.WaitGroup, doneCh chan<- Nothing, ch chan<- string) {
   wg.Wait()
+  logger.PrintfDebug("done passed wait\n")
   doneCh <- Nothing{}
   close(ch)
 }
@@ -99,24 +134,33 @@ func done(wg sync.WaitGroup, doneCh chan<- Nothing, ch chan<- string) {
 // RPC from grep client to query log server
 // Calls each log server to retrieve the its logs and populates a channel to send back to the grep client over TCP
 func (*GrepClientRpc) GrepQuery(args Args, s *srpc.Session) error {
+  logger.PrintfDebug("Received grep query: %s\n", args.Query)
   return srpc.S( func() error {
     // query the other servers
     var grepResultsCh = make(chan string)
     var doneCh = make(chan Nothing)
     var wg sync.WaitGroup
 
+    // Grep from other servers
     for i, addrStr := range machineAddrs {
-      go serverReader(wg, args, addrStr, kListenPort + i, grepResultsCh)
+      wg.Add(1)
+      go serverReader(&wg, args, addrStr, kListenPort + i, grepResultsCh)
     }
-    go done(wg, doneCh, grepResultsCh)
+    // Grep from this server
+    wg.Add(1)
+    go func(wgroup *sync.WaitGroup) {
+      defer wgroup.Done()
+      grepLogs(args, grepResultsCh, nil)
+      logger.PrintfDebug("grepLogs done\n")
+    }(&wg)
+    // Call back when the grep calls return
+    go done(&wg, doneCh, grepResultsCh)
 
     for {
       select {
       case <-doneCh:
-        for line := range grepResultsCh {
-          s.PushValue(line)
-        }
-        break
+        logger.PrintfDebug("Done receiving results\n");
+        return nil
       case line := <-grepResultsCh:
         s.PushValue(line)
       }
@@ -132,6 +176,7 @@ func readMachineFile(fileName string) {
   file, err := os.Open(fileName)
   if err != nil {
     fmt.Fprintf(os.Stderr, "Could not open machine file: " + err.Error())
+    usage()
     os.Exit(1)
   }
 
@@ -157,12 +202,9 @@ func main() {
   logger.SetLevel(leveled_logger.LogLevel(*debugLevel))
   defer logger.AutoPrefix("main: ")()
 
-  if flag.NArg() != 1 {
-    usage()
-    os.Exit(1)
+  if flag.NArg() == 1 {
+    readMachineFile(flag.Args()[0])
   }
-
-  readMachineFile(flag.Args()[0])
 
   rpc.Register(new(GrepClientRpc))
   rpc.Register(new(LogServerRpc))
