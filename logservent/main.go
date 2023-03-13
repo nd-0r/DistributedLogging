@@ -14,6 +14,7 @@ import (
   "sync"
   "errors"
   "andreworals.com/dlogger/leveled_logger"
+  "andreworals.com/dlogger/chan_grep"
   "github.com/hsfzxjy/go-srpc"
 )
 
@@ -34,58 +35,7 @@ type Nothing struct {}
 type LogServerRpc string
 type GrepClientRpc string
 
-type Args struct {
-  Query    string
-}
-
 //==============================================================//
-
-func grepLogs(args Args, resultsCh chan<- string, errCh chan<- error) {
-  var errOut error = nil
-  defer func() {
-    if errOut != nil && errCh != nil {
-      errCh <- errOut
-    }
-    if errOut != nil {
-      logger.PrintfDebug(errOut.Error())
-    }
-  }()
-
-  dirents, err := os.ReadDir(*logDir)
-  if err != nil {
-    errOut = errors.New("Could not read logs: " + err.Error())
-    return
-  }
-
-  for _, dirent := range dirents {
-    grepCmd := exec.Command("grep", "-e", args.Query, filepath.Join(*logDir, dirent.Name()))
-    logger.PrintfDebug("grepCmd: %s\n", grepCmd.String())
-    grepOut, err := grepCmd.StdoutPipe()
-
-    if err != nil {
-      errOut = errors.New("Could not open pipe from grep: " + err.Error())
-      return
-    }
-
-    if err := grepCmd.Start(); err != nil {
-      errOut = errors.New("Could not start grep" + err.Error())
-      return
-    }
-
-    grepOutScanner := bufio.NewScanner(grepOut)
-    for grepOutScanner.Scan() {
-      toout := grepOutScanner.Text()
-      resultsCh <- toout
-    }
-
-    if err := grepCmd.Wait(); err != nil {
-      if grepCmd.ProcessState.ExitCode() != 1 {
-        errOut = errors.New("Failed to wait on grep process: " + err.Error())
-        return
-      }
-    }
-  }
-}
 
 // RPC from queried log server to log server
 // Takes output from grep and sends it over a TCP connection to the caller
@@ -94,7 +44,7 @@ func (*LogServerRpc) LoggerQuery(args Args, s *srpc.Session) error {
     resultsCh := make(chan string)
     errCh := make(chan error)
 
-    go grepLogs(args, resultsCh, errCh)
+    go grepLogs(args, *logDir, resultsCh, errCh)
 
     for {
       select {
