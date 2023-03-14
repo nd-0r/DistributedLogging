@@ -13,13 +13,10 @@ type Args struct {
   Query string
 }
 
-const kListenPort = 1233
-const kRpcPort = "1234"
-
 var address = flag.String("a", "localhost", "The address of the log servent")
 
 func query(q string, addr string) {
-  c, err := rpc.DialHTTP("tcp", addr + ":" + kRpcPort)
+  c, err := rpc.DialHTTP("tcp", addr)
   if err != nil {
     log.Fatal("dialing:", err)
   }
