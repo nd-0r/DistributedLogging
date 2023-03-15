@@ -4,7 +4,7 @@ A distributed log-querying system
 
 ## Design
 
-Each logservent serves a directory of logs. Since each logservent starts with a list of addresses of all other logservents in the system, each logservent can act as a client to all other logservents in the system. The dgrep utility (short for distributed grep) can query an individual logservent, which then greps the query locally and collects the grep results from all other servers, sending the aggregate back to the dgrep utility.
+Each logservent serves a directory of logs. Since each logservent starts with a list of addresses of all other logservents in the system, each logservent can act as a client to all other logservents in the system. The dgrep utility (short for distributed grep) queries an individual logservent, which then greps the query locally and collects the grep results from all other servers, sending the aggregate back to the dgrep utility.
 
 ## Testing
 
