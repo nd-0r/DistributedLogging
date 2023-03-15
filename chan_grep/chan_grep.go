@@ -6,6 +6,7 @@ import (
   "path/filepath"
   "bufio"
   "errors"
+  "bytes"
 )
 
 
@@ -13,13 +14,40 @@ type Args struct {
   Query    string
 }
 
-func GrepLogs(args Args, logDir string, resultsCh chan<- string, errCh chan<- error) {
+// mostly from https://cs.opensource.google/go/go/+/refs/tags/go1.20.2:src/bufio/scan.go;l=350
+var customLineSplit = func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+  if atEOF && len(data) == 0 {
+    return 0, nil, nil
+  }
+
+  if i := bytes.IndexByte(data, '\n'); i >= 0 {
+    // We have a full newline-terminated line.
+    return i + 1, data[0:i], nil
+  }
+
+  // If we're at EOF, we have a final, non-terminated line. Return it.
+  if atEOF {
+    return len(data), data, nil
+  }
+
+  // Request more data.
+  return 0, nil, nil
+}
+
+func GrepLogs(args Args,
+              logDir string,
+              closeResults bool,
+              resultsCh chan<- string,
+              errCh chan<- error) {
   var errOut error = nil
   defer func() {
     if errOut != nil && errCh != nil {
       errCh <- errOut
     }
-    close(resultsCh)
+
+    if closeResults {
+      close(resultsCh)
+    }
   }()
 
   dirents, err := os.ReadDir(logDir)
@@ -43,6 +71,7 @@ func GrepLogs(args Args, logDir string, resultsCh chan<- string, errCh chan<- er
     }
 
     grepOutScanner := bufio.NewScanner(grepOut)
+    grepOutScanner.Split(customLineSplit)
     for grepOutScanner.Scan() {
       toout := grepOutScanner.Text()
       resultsCh <- toout

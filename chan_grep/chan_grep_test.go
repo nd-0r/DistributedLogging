@@ -42,9 +42,9 @@ var tests = []grepTest {
   },
   {
     "a",
-    []string{"a",},
-    []string{"a"},
-    "a",
+    []string{"a\nb\na\nb\nc\nbd\naba\nb\na\n",},
+    []string{"a", "a", "aba", "a"},
+    "",
   },
   {
     "a",
@@ -89,7 +89,7 @@ func (test *grepTest) RunGrepTest(t *testing.T) {
   resultChan := make(chan string)
   errorChan := make(chan error)
 
-  go GrepLogs(args, test.LogsDir, resultChan, errorChan)
+  go GrepLogs(args, test.LogsDir, true, resultChan, errorChan)
 
   var out []string
 

@@ -32,8 +32,7 @@ func query(q string, addr string) {
   }
 
   for line := range stream.C() {
-    // fmt.Print(line.(string))
-    log.Printf("recieve value from remote: %+v\n", line)
+    fmt.Println(line.(string))
   }
 }
 

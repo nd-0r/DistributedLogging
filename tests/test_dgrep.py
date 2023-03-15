@@ -62,12 +62,22 @@ class Process(object):
         self._spawned = True
         self._running = True
 
-    def force_kill(self):
+    def send_sigint(self):
         if not self._spawned or not self._running:
-            return
+            return False
 
         assert self._popen
-        os.killpg(os.getpgid(self._popen.pid), signal.SIGKILL)
+
+        self._popen.send_signal(signal.SIGINT)
+
+    def force_kill(self):
+        if not self._spawned or not self._running:
+            return False
+
+        assert self._popen
+
+        self._popen.kill()
+
         if self._outfile:
             self._outfile.close()
         self._running = False
@@ -120,16 +130,18 @@ class Test(object):
         self._qfreq = qfreq
         self._query_bytes = bytearray(b'abc123')
         self._max_word_size = 24
-        self._dgrep_query = query if query else str(self._query_bytes)
+        self._dgrep_query = query if query else self._query_bytes.decode('ascii')
         self._start_port_num = 1234
 
         # Populated during setup
         self._exe_path_bundle = None
         self._tmpdir = None
-        self._full_log_path = None
         self._expected_filepath = None
         self._dgrep_out_filepath = None
         self._machine_log_dirs = []
+        self._machine_log_filepaths = []
+        self._dgrep_proc = None
+        self._logservent_procs = []
 
     def get_name(self):
         return self._name
@@ -137,10 +149,20 @@ class Test(object):
     def _setup(self):
         self._tmpdir = tempfile.mkdtemp()
         self._make_logs()
+        self._calc_expected_output()
 
-    def _teardown(self):
+    def _teardown(self, rm_tmpdir: bool = True):
         assert self._tmpdir
-        shutil.rmtree(self._tmpdir)
+
+        if rm_tmpdir:
+            shutil.rmtree(self._tmpdir)
+        else:
+            print(self._tmpdir)
+
+        if self._dgrep_proc:
+            self._dgrep_proc.force_kill()
+        for proc in self._logservent_procs:
+            proc.force_kill()
 
     def _build_log_word(self) -> bytearray:
         word = self._query_bytes
@@ -151,55 +173,52 @@ class Test(object):
         return word
 
     def _make_logs(self):
-        bytes_written = 0
-        q_timer_start = int(self._qfreq * self._log_size)
+        q_timer_start = int(1 / self._qfreq)
         q_timer = q_timer_start
 
-        self._full_log_path = os.path.join(self._tmpdir, "log.log")
+        for i, machine_dist in enumerate(self._dist):
+            machine_dir = os.path.join(self._tmpdir, f'machine{i}')
+            os.mkdir(machine_dir)
+            self._machine_log_dirs.append(machine_dir)
 
-        with open(self._full_log_path, "+wb") as full_logfile:
-            for i, machine_dist in enumerate(self._dist):
-                machine_dir = os.path.join(self._tmpdir, f'machine{i}')
-                os.mkdir(machine_dir)
-                self._machine_log_dirs.append(machine_dir)
+            for j,d in enumerate(machine_dist):
+                bytes_written = 0
+                file_bytes = int(self._log_size * d)
+                log_path = os.path.join(machine_dir, f'log{j}.log')
+                self._machine_log_filepaths.append(log_path)
 
-                for j,d in enumerate(machine_dist):
-                    file_bytes = int(self._log_size * d)
-                    log_path = os.path.join(machine_dir, f'log{j}.log')
+                with open(log_path, "+wb") as machine_logfile:
+                    while bytes_written < file_bytes:
+                        if q_timer <= 0:
+                            to_write = self._query_bytes
+                            q_timer = q_timer_start
+                        else:
+                            word = self._build_log_word()
+                            punct = bytearray(random.choice(string.punctuation +\
+                                                            string.whitespace),
+                                              encoding='ascii')
+                            to_write = word + punct
+                            bytes_written += len(to_write)
+                            q_timer -= len(to_write)
 
-                    with open(log_path, "+wb") as machine_logfile:
-                        while bytes_written < file_bytes:
-                            if q_timer <= 0:
-                                to_write = self._query_bytes
-                                q_timer = q_timer_start
-                            else:
-                                word = self._build_log_word()
-                                punct = bytearray(random.choice(string.punctuation +\
-                                                                string.whitespace),
-                                                  encoding='ascii')
-                                to_write = word + punct
-                                bytes_written += len(to_write)
-                                q_timer -= len(to_write)
-
-                            for file in [full_logfile, machine_logfile]:
-                                file.write(to_write)
+                        machine_logfile.write(to_write)
 
     def _calc_expected_output(self):
         assert self._dgrep_query
-        assert self._full_log_path
         assert self._exe_path_bundle
 
         grep_proc = Process([self._exe_path_bundle.grep_cmd_path,
                              '-e',
                              self._dgrep_query,
-                             self._full_log_path])
-        self._expected_filepath = output_file_path=os.path.join(self._tmpdir, "expected.txt")
+                             '-h',
+                             *self._machine_log_filepaths])
+        self._expected_filepath = os.path.join(self._tmpdir, "expected.txt")
         grep_proc.spawn(self._expected_filepath)
         retcode = grep_proc.wait(5)
 
-        if retcode is None or retcode != 0:
+        if retcode is None or retcode > 1:
             grep_proc.force_kill()
-            raise RuntimeError(f"Failed calculating expected output for test {self._name}")
+            raise RuntimeError(f"Failed waiting on grep calculating expected output for test {self._name} got retcode {retcode}")
 
         sort_proc = Process([self._exe_path_bundle.sort_cmd_path,
                              self._expected_filepath,
@@ -210,7 +229,7 @@ class Test(object):
 
         if retcode is None or retcode != 0:
             sort_proc.force_kill()
-            raise RuntimeError(f"Failed calculating expected output for test {self._name}")
+            raise RuntimeError(f"Failed waiting on sort calculating expected output for test {self._name} got retcode {retcode}")
 
     def _sort_and_diff_output(self):
         assert self._expected_filepath
@@ -246,47 +265,49 @@ class Test(object):
         self._setup()
         # "Usage: %s [-d <log directory>] [-v <integer debug level>] <port> <machine file>\n"
 
-        logservent_procs = []
+        try:
+            for i,logdir in enumerate(self._machine_log_dirs):
+                machine_filepath = os.path.join(self._tmpdir, f"machine{i}.txt")
 
-        for i,logdir in enumerate(self._machine_log_dirs):
-            machine_filepath = os.path.join(self._tmpdir, f"machine{i}.txt")
+                with open(machine_filepath, "w") as mfile:
+                    for j in range(len(self._machine_log_dirs)):
+                        if j != i:
+                            mfile.write(f"localhost:{self._start_port_num + j}\n")
 
-            with open(machine_filepath, "w") as mfile:
-                for j in range(len(self._machine_log_dirs)):
-                    if j != i:
-                        mfile.write(f"localhost:{self._start_port_num + j}\n")
+                logservent_proc = Process([self._exe_path_bundle.logservent_exe_path,
+                                           "-d",
+                                           logdir,
+                                           "-v",
+                                           "0",
+                                           str(self._start_port_num + i),
+                                           machine_filepath])
+                logservent_proc.spawn()
+                self._logservent_procs.append(logservent_proc)
 
-            logservent_proc = Process([self._exe_path_bundle.logservent_exe_path,
-                                       "-d",
-                                       logdir,
-                                       str(self._start_port_num + i),
-                                       machine_filepath])
-            logservent_proc.spawn()
-            logservent_procs.append(logservent_proc)
+            # "Usage: %s [-a <log server address>] <query string>\n"
+            self._dgrep_proc = Process([self._exe_path_bundle.dgrep_exe_path,
+                                        "-a",
+                                        "localhost:" + str(self._start_port_num),
+                                        self._dgrep_query])
 
-        # "Usage: %s [-a <log server address>] <query string>\n"
-        dgrep_proc = Process([self._exe_path_bundle.dgrep_exe_path,
-                              "-a",
-                              "localhost" + str(self._start_port_num),
-                              self._dgrep_query])
+            time.sleep(0.5)
 
-        time.sleep(0.5)
+            self._dgrep_out_filepath = os.path.join(self._tmpdir, "dgrep_out.txt")
+            self._dgrep_proc.spawn(self._dgrep_out_filepath)
 
-        self._dgrep_out_filepath = os.path.join(self._tmpdir, "dgrep_out.txt")
-        dgrep_proc.spawn(self._dgrep_out_filepath)
-
-        retcode = dgrep_proc.wait(1)
-        if retcode is None or retcode != 0:
-            dgrep_proc.force_kill()
-            raise RuntimeError(f"Failed waiting on dgrep for test {self._name}")
-
-        for logservent_proc in logservent_procs:
-            retcode = logservent_proc.wait(1)
+            retcode = self._dgrep_proc.wait(10)
             if retcode is None or retcode != 0:
-                logservent_proc.force_kill()
-                raise RuntimeError(f"Failed waiting on logservent for test {self._name}")
+                raise RuntimeError(f"Failed waiting on dgrep for test {self._name} got retcode {retcode}")
 
-        return self._sort_and_diff_output()
+            for logservent_proc in self._logservent_procs:
+                logservent_proc.send_sigint()
+                retcode = logservent_proc.wait(1)
+                if retcode is None:
+                    raise RuntimeError(f"Failed waiting on logservent for test {self._name} got retcode {retcode}")
+
+            return self._sort_and_diff_output()
+        finally:
+            self._teardown(rm_tmpdir=True)
 
 def find_command_paths():
     return (subprocess.check_output(['which', 'grep']).strip().decode('utf-8'),
@@ -298,7 +319,7 @@ def main():
 
     tests = [
         Test("test_one_machine_basic_small",
-             1024,
+             256,
              [[1.0]],
              0.25),
         Test("test_one_machine_basic_large",
@@ -397,7 +418,9 @@ def main():
             else:
                 num_passed += 1
         except RuntimeError as e:
-            print(f"Test error: {test.get_name()}, {e}")
+            print(f"Test runtime error: {test.get_name()}, {e}")
+        except Exception as e:
+            print(f"Test other error: {test.get_name()}, {e}")
 
     print(f"Passed {num_passed} of {len(tests)} tests")
     if num_passed != len(tests):

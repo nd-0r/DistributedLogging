@@ -31,6 +31,8 @@ type Nothing struct {}
 type LogServerRpc string
 type GrepClientRpc string
 
+var rpcPort *string = nil
+
 //==============================================================//
 
 // RPC from queried log server to log server
@@ -40,11 +42,15 @@ func (*LogServerRpc) LoggerQuery(args chan_grep.Args, s *srpc.Session) error {
     resultsCh := make(chan string)
     errCh := make(chan error)
 
-    go chan_grep.GrepLogs(args, *logDir, resultsCh, errCh)
+    go chan_grep.GrepLogs(args, *logDir, true, resultsCh, errCh)
 
+    L:
     for {
       select {
-      case line := <-resultsCh:
+      case line, ok := <-resultsCh:
+        if !ok {
+          break L
+        }
         s.PushValue(line)
       case err := <-errCh:
         return err
@@ -67,21 +73,24 @@ func serverReader(wg *sync.WaitGroup, args chan_grep.Args, addrStr string, ch ch
 
   stream, err := client.CallStream("LogServerRpc.LoggerQuery", args)
   for line := range stream.C() {
+    logger.PrintfDebug("Logservent received line from %s\n", addrStr)
     ch <- line.(string)
   }
+
+  logger.PrintfDebug("Logservent receiving from %s done\n", addrStr)
 }
 
 func done(wg *sync.WaitGroup, doneCh chan<- Nothing, ch chan<- string) {
   wg.Wait()
   logger.PrintfDebug("done passed wait\n")
   doneCh <- Nothing{}
-  close(ch)
+  // close(ch)
 }
 
 // RPC from grep client to query log server
 // Calls each log server to retrieve the its logs and populates a channel to send back to the grep client over TCP
 func (*GrepClientRpc) GrepQuery(args chan_grep.Args, s *srpc.Session) error {
-  logger.PrintfDebug("Received grep query: %s\n", args.Query)
+  logger.PrintfDebug("< %s > received grep query: %s\n", *rpcPort, args.Query)
   return srpc.S( func() error {
     // query the other servers
     var grepResultsCh = make(chan string)
@@ -97,7 +106,7 @@ func (*GrepClientRpc) GrepQuery(args chan_grep.Args, s *srpc.Session) error {
     wg.Add(1)
     go func(wgroup *sync.WaitGroup) {
       defer wgroup.Done()
-      chan_grep.GrepLogs(args, *logDir, grepResultsCh, nil)
+      chan_grep.GrepLogs(args, *logDir, false, grepResultsCh, nil)
       logger.PrintfDebug("grepLogs done\n")
     }(&wg)
     // Call back when the grep calls return
@@ -158,13 +167,13 @@ func main() {
     usage()
     os.Exit(1)
   }
-  rpcPort := flag.Args()[0]
+  rpcPort = &flag.Args()[0]
   readMachineFile(flag.Args()[1])
 
   rpc.Register(new(GrepClientRpc))
   rpc.Register(new(LogServerRpc))
   rpc.HandleHTTP()
-  l, e := net.Listen("tcp", ":" + rpcPort)
+  l, e := net.Listen("tcp", ":" + *rpcPort)
   if e != nil {
     fmt.Fprintf(os.Stderr, "listen error: ", e.Error())
     os.Exit(1)
